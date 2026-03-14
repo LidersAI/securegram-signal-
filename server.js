@@ -1,56 +1,26 @@
 import { PeerServer } from 'peer';
-import http from 'http';
 
-// Railway сам выдаёт PORT — обязательно читать из env
 const PORT = process.env.PORT || 9000;
 
-const server = http.createServer((req, res) => {
-  // Healthcheck — Railway и мониторинг стучат сюда
-  if (req.url === '/health' || req.url === '/') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      ok: true,
-      service: 'SecureGram Signal',
-      peers: getCount(),
-      ts: Date.now()
-    }));
-    return;
-  }
-  res.writeHead(404);
-  res.end();
-});
-
 const peerServer = PeerServer({
-  server,
+  port: PORT,
   path: '/signal',
-  proxied: true,           // за Railway reverse proxy
-  allow_discovery: false,  // не показывать список пиров
+  proxied: true,
+  allow_discovery: false,
   alive_timeout: 60000,
   cleanup_out_msgs: 1000,
+  key: 'peerjs',
 });
 
 peerServer.on('connection', (client) => {
-  console.log(`[+] ${client.getId()} | peers: ${getCount()}`);
+  console.log(`[+] ${client.getId()}`);
 });
 
 peerServer.on('disconnect', (client) => {
-  console.log(`[-] ${client.getId()} | peers: ${getCount()}`);
+  console.log(`[-] ${client.getId()}`);
 });
 
-peerServer.on('error', (err) => {
-  console.error('[!]', err.message);
-});
+console.log(`Signal Server running on port ${PORT}`);
 
-function getCount() {
-  try { return peerServer._clients?.size ?? '?'; }
-  catch { return '?'; }
-}
-
-server.listen(PORT, () => {
-  console.log(`SecureGram Signal Server запущен на порту ${PORT}`);
-  console.log(`Healthcheck: /health`);
-  console.log(`WebSocket:   /signal`);
-});
-
-process.on('SIGTERM', () => server.close(() => process.exit(0)));
-process.on('SIGINT',  () => server.close(() => process.exit(0)));
+process.on('SIGTERM', () => process.exit(0));
+process.on('SIGINT',  () => process.exit(0));
