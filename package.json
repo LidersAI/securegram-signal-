@@ -1,14 +1,16 @@
 {
-  "name": "securegram-signal",
-  "version": "1.0.0",
-  "description": "SecureGram P2P signaling server",
-  "type": "module",
+  "name": "liders-chat-signal",
+  "version": "2.0.0",
+  "description": "LIDERS CHAT Signal Server with Socket.io polling fallback",
+  "type": "commonjs",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "peer": "^1.0.2"
+    "socket.io": "^4.7.4",
+    "express": "^4.18.2",
+    "cors": "^2.8.5"
   },
   "engines": {
     "node": ">=18.0.0"

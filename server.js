@@ -1,126 +1,144 @@
-import { PeerServer } from 'peer';
-import http from 'http';
+const express = require('express');
+const { createServer } = require('http');
+const { Server } = require('socket.io');
+const cors = require('cors');
 
 const PORT = process.env.PORT || 9000;
+const app = express();
+app.use(cors({ origin: '*' }));
+app.use(express.json({ limit: '3mb' }));
+
+const httpServer = createServer(app);
+
+// Socket.io with polling fallback — works even when WebSocket is blocked
+const io = new Server(httpServer, {
+  cors: { origin: '*', methods: ['GET', 'POST'] },
+  // Allow both WebSocket and long-polling
+  transports: ['websocket', 'polling'],
+  // Polling settings for blocked WS environments
+  pingTimeout: 60000,
+  pingInterval: 25000,
+  upgradeTimeout: 10000,
+  allowUpgrades: true,
+});
 
 // ═══════════════════════════════════════════
-//  OFFLINE MESSAGE STORE
-//  Сервер хранит зашифрованные сообщения.
-//  Расшифровать их может только получатель.
+//  PEER REGISTRY
 // ═══════════════════════════════════════════
+const peers = new Map(); // peerId -> socketId
+const sockets = new Map(); // socketId -> peerId
 
+// ═══════════════════════════════════════════
+//  OFFLINE MESSAGE QUEUE
+// ═══════════════════════════════════════════
 const queue = new Map(); // peerId -> [{id, cipher, from, roomId, storedAt}]
-const MAX_PER_PEER = 500;
-const TTL = 7 * 24 * 60 * 60 * 1000; // 7 дней
+const MAX_Q = 500;
+const TTL = 7 * 24 * 3600 * 1000;
 
 function queueMsg(to, msg) {
   if (!queue.has(to)) queue.set(to, []);
   const q = queue.get(to);
-  // Deduplicate by id
   if (msg.id && q.find(m => m.id === msg.id)) return;
   q.push({ ...msg, storedAt: Date.now() });
-  if (q.length > MAX_PER_PEER) q.splice(0, q.length - MAX_PER_PEER);
+  if (q.length > MAX_Q) q.splice(0, q.length - MAX_Q);
 }
-
 function fetchQueue(peerId) {
   const q = (queue.get(peerId) || []).filter(m => Date.now() - m.storedAt < TTL);
   queue.delete(peerId);
   return q;
 }
-
-// Cleanup every hour
 setInterval(() => {
-  let peers = 0, msgs = 0;
+  let total = 0;
   for (const [id, q] of queue.entries()) {
     const fresh = q.filter(m => Date.now() - m.storedAt < TTL);
     if (!fresh.length) queue.delete(id);
-    else { queue.set(id, fresh); peers++; msgs += fresh.length; }
+    else { queue.set(id, fresh); total += fresh.length; }
   }
-  if (peers) console.log(`[cleanup] ${peers} peers, ${msgs} msgs`);
 }, 3600000);
 
 // ═══════════════════════════════════════════
-//  HTTP SERVER
+//  SOCKET.IO SIGNALING
 // ═══════════════════════════════════════════
+io.on('connection', (socket) => {
+  let myPeerId = null;
 
-const server = http.createServer((req, res) => {
-  const url = new URL(req.url, `http://x`);
+  // Register peer
+  socket.on('register', (peerId) => {
+    if (!peerId) return;
+    myPeerId = peerId;
+    peers.set(peerId, socket.id);
+    sockets.set(socket.id, peerId);
+    console.log(`[+] ${peerId.slice(0,8)} peers:${peers.size} transport:${socket.conn.transport.name}`);
 
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    // Deliver queued messages
+    const queued = fetchQueue(peerId);
+    if (queued.length > 0) {
+      socket.emit('queued', queued);
+      console.log(`[relay] delivered ${queued.length} msgs to ${peerId.slice(0,8)}`);
+    }
+  });
 
-  if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
+  // Signal relay: forward to target peer
+  socket.on('signal', ({ to, data }) => {
+    const targetSocketId = peers.get(to);
+    if (targetSocketId) {
+      io.to(targetSocketId).emit('signal', { from: myPeerId, data });
+    } else {
+      // Target offline - queue if it's a message
+      if (data && data.type === 'msg' && data.cipher) {
+        queueMsg(to, { id: data.id, cipher: data.cipher, from: myPeerId, roomId: data.roomId });
+      }
+      socket.emit('peer_offline', { peerId: to });
+    }
+  });
 
-  // Health
-  if (url.pathname === '/' || url.pathname === '/health') {
-    let total = 0; queue.forEach(q => total += q.length);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, service: 'LIDERS CHAT', peers: getCount(), queued: total }));
-    return;
-  }
-
-  // POST /relay — store msgs for offline peer
-  // Body: { to: "peerID", msgs: [{id, cipher, from, roomId}] }
-  if (url.pathname === '/relay' && req.method === 'POST') {
-    let body = '';
-    req.on('data', d => { body += d; if (body.length > 3000000) { res.writeHead(413); res.end(); } });
-    req.on('end', () => {
-      try {
-        const data = JSON.parse(body);
-        if (!data.to || !Array.isArray(data.msgs)) { res.writeHead(400); res.end('{}'); return; }
-        let n = 0;
-        data.msgs.forEach(m => { if (m.id && m.cipher) { queueMsg(data.to, m); n++; } });
-        console.log(`[relay] +${n} msgs for ${data.to.slice(0,8)}`);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: true, stored: n }));
-      } catch(e) { res.writeHead(400); res.end('{}'); }
-    });
-    return;
-  }
-
-  // GET /relay?peer=ID — fetch and clear queue
-  if (url.pathname === '/relay' && req.method === 'GET') {
-    const peerId = url.searchParams.get('peer');
-    if (!peerId) { res.writeHead(400); res.end('{}'); return; }
-    const msgs = fetchQueue(peerId);
-    console.log(`[relay] delivered ${msgs.length} msgs to ${peerId.slice(0,8)}`);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, msgs }));
-    return;
-  }
-
-  res.writeHead(404); res.end('{}');
+  socket.on('disconnect', () => {
+    if (myPeerId) {
+      peers.delete(myPeerId);
+      sockets.delete(socket.id);
+      console.log(`[-] ${myPeerId.slice(0,8)} peers:${peers.size}`);
+    }
+  });
 });
 
 // ═══════════════════════════════════════════
-//  PEER SERVER
+//  HTTP ENDPOINTS
 // ═══════════════════════════════════════════
 
-const peerServer = PeerServer({
-  server, path: '/signal', proxied: true,
-  allow_discovery: false, alive_timeout: 60000, cleanup_out_msgs: 1000,
+app.get('/', (req, res) => {
+  let total = 0; queue.forEach(q => total += q.length);
+  res.json({ ok: true, service: 'LIDERS CHAT', peers: peers.size, queued: total, ts: Date.now() });
 });
 
-peerServer.on('connection', c => console.log(`[+] ${c.getId()} peers:${getCount()}`));
-peerServer.on('disconnect', c => console.log(`[-] ${c.getId()} peers:${getCount()}`));
-peerServer.on('error', e => console.error('[err]', e.message));
+app.get('/health', (req, res) => {
+  let total = 0; queue.forEach(q => total += q.length);
+  res.json({ ok: true, service: 'LIDERS CHAT', peers: peers.size, queued: total });
+});
 
-function getCount() { try { return peerServer._clients?.size ?? '?'; } catch { return '?'; } }
+// Legacy HTTP relay (fallback)
+app.post('/relay', (req, res) => {
+  const { to, msgs } = req.body;
+  if (!to || !Array.isArray(msgs)) { res.status(400).json({}); return; }
+  let n = 0;
+  msgs.forEach(m => { if (m.id && m.cipher) { queueMsg(to, m); n++; } });
+  // Try to deliver immediately if online
+  const sid = peers.get(to);
+  if (sid) { io.to(sid).emit('queued', msgs); }
+  console.log(`[relay/http] +${n} for ${to.slice(0,8)}`);
+  res.json({ ok: true, stored: n });
+});
 
-server.listen(PORT, () => console.log(`LIDERS CHAT Signal :${PORT}`));
-process.on('SIGTERM', () => server.close(() => process.exit(0)));
-process.on('SIGINT',  () => server.close(() => process.exit(0)));
+app.get('/relay', (req, res) => {
+  const peerId = req.query.peer;
+  if (!peerId) { res.status(400).json({}); return; }
+  const msgs = fetchQueue(peerId);
+  res.json({ ok: true, msgs });
+});
 
-// Self-ping every 10 min to prevent Render.com free tier sleep
-const SELF_URL = process.env.RENDER_EXTERNAL_URL || '';
-if (SELF_URL) {
-  setInterval(() => {
-    import('https').then(({default: https}) => {
-      https.get(SELF_URL + '/health', (r) => {
-        console.log('[ping] self-ping status:', r.statusCode);
-      }).on('error', (e) => console.warn('[ping] failed:', e.message));
-    });
-  }, 10 * 60 * 1000);
-  console.log('Self-ping enabled:', SELF_URL);
-}
+httpServer.listen(PORT, () => {
+  console.log(`LIDERS CHAT Signal :${PORT}`);
+  console.log(`Transports: WebSocket + HTTP long-polling (bypass WS blocks)`);
+});
+
+process.on('SIGTERM', () => httpServer.close(() => process.exit(0)));
+process.on('SIGINT', () => httpServer.close(() => process.exit(0)));
