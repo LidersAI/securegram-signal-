@@ -14,12 +14,33 @@ app.use((req, res, next) => {
 // ── Storage ──────────────────────────────────────────────
 // signals[peerId] = [{ from, data, ts }]
 const signals = {};
-// pollers[peerId] = { res, timer }  — active long-poll connections
 const pollers = {};
 
-const POLL_TIMEOUT = 20000; // 20s
-const SIGNAL_TTL   = 60000; // 1 min
+const POLL_TIMEOUT = 20000;
+const SIGNAL_TTL   = 60000;
 const MAX_SIGNALS  = 100;
+
+// ── Rate limiting ─────────────────────────────
+const rateLimits = {}; // ip -> {count, resetAt}
+const RATE_WINDOW = 60000; // 1 min
+const RATE_MAX_SIGNAL = 120; // max 120 signals/min per IP
+const RATE_MAX_POLL = 60;    // max 60 polls/min per IP
+
+function checkRateLimit(ip, type) {
+  const key = ip + ':' + type;
+  const now = Date.now();
+  if (!rateLimits[key] || now > rateLimits[key].resetAt) {
+    rateLimits[key] = { count: 0, resetAt: now + RATE_WINDOW };
+  }
+  rateLimits[key].count++;
+  const max = type === 'signal' ? RATE_MAX_SIGNAL : RATE_MAX_POLL;
+  return rateLimits[key].count <= max;
+}
+// Cleanup rate limits every 2 min
+setInterval(() => {
+  const now = Date.now();
+  for (const k in rateLimits) if (now > rateLimits[k].resetAt) delete rateLimits[k];
+}, 120000);
 
 function gid() {
   return Math.random().toString(36).slice(2, 10) +
@@ -51,6 +72,8 @@ app.get('/', (req, res) => res.redirect('/health'));
 // ── POST /signal ──────────────────────────────────────────
 // Body: { to, from, data }
 app.post('/signal', (req, res) => {
+  const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown';
+  if (!checkRateLimit(ip, 'signal')) { res.status(429).json({ error: 'rate limit' }); return; }
   const { to, from, data } = req.body;
   if (!to || !from || !data) { res.status(400).json({ error: 'bad request' }); return; }
 
@@ -74,8 +97,12 @@ app.post('/signal', (req, res) => {
 
 // ── GET /poll/:peerId ─────────────────────────────────────
 app.get('/poll/:peerId', (req, res) => {
+  const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown';
+  if (!checkRateLimit(ip, 'poll')) { res.status(429).json({ error: 'rate limit' }); return; }
   const peerId = req.params.peerId;
-  if (!peerId) { res.status(400).json({ error: 'no id' }); return; }
+  if (!peerId || peerId.length > 64 || !/^[a-z0-9-]+$/i.test(peerId)) { 
+    res.status(400).json({ error: 'invalid id' }); return; 
+  }
 
   // Close any existing poll for this peer
   if (pollers[peerId]) {
