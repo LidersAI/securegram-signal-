@@ -111,3 +111,16 @@ function getCount() { try { return peerServer._clients?.size ?? '?'; } catch { r
 server.listen(PORT, () => console.log(`LIDERS CHAT Signal :${PORT}`));
 process.on('SIGTERM', () => server.close(() => process.exit(0)));
 process.on('SIGINT',  () => server.close(() => process.exit(0)));
+
+// Self-ping every 10 min to prevent Render.com free tier sleep
+const SELF_URL = process.env.RENDER_EXTERNAL_URL || '';
+if (SELF_URL) {
+  setInterval(() => {
+    import('https').then(({default: https}) => {
+      https.get(SELF_URL + '/health', (r) => {
+        console.log('[ping] self-ping status:', r.statusCode);
+      }).on('error', (e) => console.warn('[ping] failed:', e.message));
+    });
+  }, 10 * 60 * 1000);
+  console.log('Self-ping enabled:', SELF_URL);
+}
