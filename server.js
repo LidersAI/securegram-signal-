@@ -56,7 +56,7 @@ app.post('/register', (req, res) => {
 
   const salt = crypto.randomBytes(16).toString('hex');
   const passwordHash = hashPassword(password, salt);
-  const peerId = userLower + '-' + crypto.randomBytes(4).toString('hex');
+  const peerId = userLower;
 
   accounts[userLower] = { username, passwordHash, salt, peerId, createdAt: Date.now() };
   peerToUser[peerId] = userLower;
@@ -148,7 +148,7 @@ app.get('/poll/:peerId', (req, res) => {
   const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'x';
   if (!checkRate(ip, 'poll')) { res.status(429).json({ error: 'rate limit' }); return; }
   const peerId = req.params.peerId;
-  if (!peerId || peerId.length > 64 || !/^[a-zA-Z0-9_а-яёА-ЯЁ-]+$/.test(peerId)) { res.status(400).json({ error: 'invalid id' }); return; }
+  if (!peerId || peerId.length > 64 || !/^[a-zA-Z0-9_а-яёА-ЯЁ-]+$/i.test(peerId)) { res.status(400).json({ error: 'invalid id' }); return; }
   if (pollers[peerId]) { clearTimeout(pollers[peerId].timer); pollers[peerId].res.json({ signals: [] }); delete pollers[peerId]; }
   if (signals[peerId] && signals[peerId].length > 0) {
     const pending = signals[peerId]; delete signals[peerId];
