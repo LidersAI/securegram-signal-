@@ -1,8 +1,6 @@
 const express = require('express');
 const crypto = require('crypto');
-const fs = require('fs');
-const path = require('path');
-const initSqlJs = require('sql.js');
+const { Pool } = require('pg');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -16,25 +14,18 @@ app.use((req, res, next) => {
 });
 
 // ═══════════════════════════════════════════
-//  DATABASE (sql.js — pure JS SQLite)
+//  DATABASE (PostgreSQL / Supabase)
 // ═══════════════════════════════════════════
-const DB_PATH = process.env.DB_PATH || path.join('/tmp', 'liders.db');
-let db;
+const DATABASE_URL = process.env.DATABASE_URL ||
+  'postgresql://postgres:C9ZDC0bQj4Wl3JJv@db.iivmtdjflstyzexuxwxu.supabase.co:5432/postgres';
+
+const pool = new Pool({
+  connectionString: DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
 
 async function initDB() {
-  const SQL = await initSqlJs();
-
-  // Load existing DB or create new
-  if (fs.existsSync(DB_PATH)) {
-    const buf = fs.readFileSync(DB_PATH);
-    db = new SQL.Database(buf);
-    console.log(`[db] loaded from ${DB_PATH}`);
-  } else {
-    db = new SQL.Database();
-    console.log(`[db] created new database`);
-  }
-
-  db.run(`
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS accounts (
       username      TEXT PRIMARY KEY,
       display_name  TEXT NOT NULL,
@@ -42,60 +33,28 @@ async function initDB() {
       salt          TEXT NOT NULL,
       backup_hash   TEXT NOT NULL,
       backup_salt   TEXT NOT NULL,
-      peer_id       TEXT NOT NULL,
-      created_at    INTEGER NOT NULL
+      peer_id       TEXT NOT NULL UNIQUE,
+      created_at    BIGINT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS sessions (
       token       TEXT PRIMARY KEY,
       username    TEXT NOT NULL,
       peer_id     TEXT NOT NULL,
-      expires_at  INTEGER NOT NULL
+      expires_at  BIGINT NOT NULL
     );
+    CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
   `);
-
-  saveDB(); // initial save
+  console.log('[db] PostgreSQL connected (Supabase)');
 }
 
-function saveDB() {
-  try {
-    const data = db.export();
-    fs.writeFileSync(DB_PATH, Buffer.from(data));
-  } catch(e) { console.error('[db] save error:', e.message); }
-}
-
-// Save every 60s
-setInterval(saveDB, 60000);
-
-// ── DB helpers ─────────────────────────────
-function dbGet(sql, params) {
-  const stmt = db.prepare(sql);
-  stmt.bind(params || []);
-  if (stmt.step()) {
-    const row = stmt.getAsObject();
-    stmt.free();
-    return row;
-  }
-  stmt.free();
-  return null;
-}
-
-function dbRun(sql, params) {
-  db.run(sql, params || []);
-}
-
-// ── Crypto helpers ─────────────────────────
+// ── Crypto ─────────────────────────────────
 function hashPassword(password, salt) {
   return crypto.pbkdf2Sync(password, salt, 100000, 64, 'sha256').toString('hex');
 }
-
 function hashBackupCode(code, salt) {
   return crypto.pbkdf2Sync(code.toUpperCase(), salt, 10000, 32, 'sha256').toString('hex');
 }
-
-function generateToken() {
-  return crypto.randomBytes(32).toString('hex');
-}
-
+function generateToken() { return crypto.randomBytes(32).toString('hex'); }
 function generateBackupCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let code = '';
@@ -106,17 +65,25 @@ function generateBackupCode() {
   return code;
 }
 
+// Cleanup expired sessions every hour
+setInterval(async () => {
+  try { await pool.query('DELETE FROM sessions WHERE expires_at < $1', [Date.now()]); }
+  catch(e) {}
+}, 3600000);
+
 // ═══════════════════════════════════════════
 //  ACCOUNTS API
 // ═══════════════════════════════════════════
 
-app.get('/check/:username', (req, res) => {
-  const u = req.params.username.toLowerCase();
-  const exists = !!dbGet('SELECT 1 FROM accounts WHERE username=?', [u]);
-  res.json({ taken: exists });
+app.get('/check/:username', async (req, res) => {
+  try {
+    const u = req.params.username.toLowerCase();
+    const r = await pool.query('SELECT 1 FROM accounts WHERE username=$1', [u]);
+    res.json({ taken: r.rows.length > 0 });
+  } catch(e) { res.status(500).json({ error: 'db error' }); }
 });
 
-app.post('/register', (req, res) => {
+app.post('/register', async (req, res) => {
   const { username, password } = req.body || {};
   if (!username || !password) { res.status(400).json({ error: 'Укажите имя и пароль' }); return; }
   if (username.length < 3 || username.length > 32) { res.status(400).json({ error: 'Имя 3–32 символа' }); return; }
@@ -124,80 +91,93 @@ app.post('/register', (req, res) => {
   if (password.length < 4) { res.status(400).json({ error: 'Пароль минимум 4 символа' }); return; }
 
   const userLower = username.toLowerCase();
-  if (dbGet('SELECT 1 FROM accounts WHERE username=?', [userLower])) {
-    res.status(409).json({ error: 'Имя уже занято' }); return;
-  }
+  try {
+    const exists = await pool.query('SELECT 1 FROM accounts WHERE username=$1', [userLower]);
+    if (exists.rows.length) { res.status(409).json({ error: 'Имя уже занято' }); return; }
 
-  const salt = crypto.randomBytes(16).toString('hex');
-  const passwordHash = hashPassword(password, salt);
-  const backupCode = generateBackupCode();
-  const backupSalt = crypto.randomBytes(16).toString('hex');
-  const backupHash = hashBackupCode(backupCode, backupSalt);
+    const salt = crypto.randomBytes(16).toString('hex');
+    const passwordHash = hashPassword(password, salt);
+    const backupCode = generateBackupCode();
+    const backupSalt = crypto.randomBytes(16).toString('hex');
+    const backupHash = hashBackupCode(backupCode, backupSalt);
 
-  dbRun(
-    'INSERT INTO accounts (username,display_name,password_hash,salt,backup_hash,backup_salt,peer_id,created_at) VALUES (?,?,?,?,?,?,?,?)',
-    [userLower, username, passwordHash, salt, backupHash, backupSalt, userLower, Date.now()]
-  );
-  saveDB();
+    await pool.query(
+      'INSERT INTO accounts (username,display_name,password_hash,salt,backup_hash,backup_salt,peer_id,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
+      [userLower, username, passwordHash, salt, backupHash, backupSalt, userLower, Date.now()]
+    );
 
-  const token = generateToken();
-  dbRun('INSERT OR REPLACE INTO sessions (token,username,peer_id,expires_at) VALUES (?,?,?,?)',
-    [token, userLower, userLower, Date.now() + 30*24*3600*1000]);
+    const token = generateToken();
+    await pool.query(
+      'INSERT INTO sessions (token,username,peer_id,expires_at) VALUES ($1,$2,$3,$4) ON CONFLICT (token) DO UPDATE SET expires_at=$4',
+      [token, userLower, userLower, Date.now() + 30*24*3600*1000]
+    );
 
-  console.log(`[+] registered: ${username}`);
-  res.json({ ok: true, token, peerId: userLower, username, backupCode });
+    console.log(`[+] registered: ${username}`);
+    res.json({ ok: true, token, peerId: userLower, username, backupCode });
+  } catch(e) { console.error(e); res.status(500).json({ error: 'Ошибка сервера' }); }
 });
 
-app.post('/login', (req, res) => {
+app.post('/login', async (req, res) => {
   const { username, password } = req.body || {};
   if (!username || !password) { res.status(400).json({ error: 'Укажите имя и пароль' }); return; }
 
   const userLower = username.toLowerCase();
-  const account = dbGet('SELECT * FROM accounts WHERE username=?', [userLower]);
-  if (!account) { res.status(401).json({ error: 'Аккаунт не найден' }); return; }
+  try {
+    const r = await pool.query('SELECT * FROM accounts WHERE username=$1', [userLower]);
+    if (!r.rows.length) { res.status(401).json({ error: 'Аккаунт не найден' }); return; }
+    const account = r.rows[0];
 
-  const hash = hashPassword(password, account.salt);
-  if (hash !== account.password_hash) { res.status(401).json({ error: 'Неверный пароль' }); return; }
+    const hash = hashPassword(password, account.salt);
+    if (hash !== account.password_hash) { res.status(401).json({ error: 'Неверный пароль' }); return; }
 
-  const token = generateToken();
-  dbRun('INSERT OR REPLACE INTO sessions (token,username,peer_id,expires_at) VALUES (?,?,?,?)',
-    [token, userLower, account.peer_id, Date.now() + 30*24*3600*1000]);
+    const token = generateToken();
+    await pool.query(
+      'INSERT INTO sessions (token,username,peer_id,expires_at) VALUES ($1,$2,$3,$4) ON CONFLICT (token) DO UPDATE SET expires_at=$4',
+      [token, userLower, account.peer_id, Date.now() + 30*24*3600*1000]
+    );
 
-  console.log(`[login] ${account.display_name}`);
-  res.json({ ok: true, token, peerId: account.peer_id, username: account.display_name });
+    console.log(`[login] ${account.display_name}`);
+    res.json({ ok: true, token, peerId: account.peer_id, username: account.display_name });
+  } catch(e) { res.status(500).json({ error: 'Ошибка сервера' }); }
 });
 
 app.post('/guest', (req, res) => {
   res.json({ ok: true, peerId: 'g-' + crypto.randomBytes(8).toString('hex') });
 });
 
-app.post('/recover', (req, res) => {
+app.post('/recover', async (req, res) => {
   const { username, backupCode, newPassword } = req.body || {};
   if (!username || !backupCode || !newPassword) { res.status(400).json({ error: 'Заполните все поля' }); return; }
   if (newPassword.length < 4) { res.status(400).json({ error: 'Пароль минимум 4 символа' }); return; }
 
   const userLower = username.toLowerCase();
-  const account = dbGet('SELECT * FROM accounts WHERE username=?', [userLower]);
-  if (!account) { res.status(404).json({ error: 'Аккаунт не найден' }); return; }
+  try {
+    const r = await pool.query('SELECT * FROM accounts WHERE username=$1', [userLower]);
+    if (!r.rows.length) { res.status(404).json({ error: 'Аккаунт не найден' }); return; }
+    const account = r.rows[0];
 
-  const inputHash = hashBackupCode(backupCode, account.backup_salt);
-  if (inputHash !== account.backup_hash) { res.status(401).json({ error: 'Неверный код восстановления' }); return; }
+    const inputHash = hashBackupCode(backupCode, account.backup_salt);
+    if (inputHash !== account.backup_hash) { res.status(401).json({ error: 'Неверный код восстановления' }); return; }
 
-  const newSalt = crypto.randomBytes(16).toString('hex');
-  const newPassHash = hashPassword(newPassword, newSalt);
-  const newBackup = generateBackupCode();
-  const newBackupSalt = crypto.randomBytes(16).toString('hex');
-  const newBackupHash = hashBackupCode(newBackup, newBackupSalt);
+    const newSalt = crypto.randomBytes(16).toString('hex');
+    const newPassHash = hashPassword(newPassword, newSalt);
+    const newBackup = generateBackupCode();
+    const newBackupSalt = crypto.randomBytes(16).toString('hex');
+    const newBackupHash = hashBackupCode(newBackup, newBackupSalt);
 
-  dbRun('UPDATE accounts SET password_hash=?,salt=?,backup_hash=?,backup_salt=? WHERE username=?',
-    [newPassHash, newSalt, newBackupHash, newBackupSalt, userLower]);
-  saveDB();
+    await pool.query(
+      'UPDATE accounts SET password_hash=$1, salt=$2, backup_hash=$3, backup_salt=$4 WHERE username=$5',
+      [newPassHash, newSalt, newBackupHash, newBackupSalt, userLower]
+    );
 
-  const token = generateToken();
-  dbRun('INSERT OR REPLACE INTO sessions (token,username,peer_id,expires_at) VALUES (?,?,?,?)',
-    [token, userLower, account.peer_id, Date.now() + 30*24*3600*1000]);
+    const token = generateToken();
+    await pool.query(
+      'INSERT INTO sessions (token,username,peer_id,expires_at) VALUES ($1,$2,$3,$4) ON CONFLICT (token) DO UPDATE SET expires_at=$4',
+      [token, userLower, account.peer_id, Date.now() + 30*24*3600*1000]
+    );
 
-  res.json({ ok: true, token, peerId: account.peer_id, username: account.display_name, newBackupCode: newBackup });
+    res.json({ ok: true, token, peerId: account.peer_id, username: account.display_name, newBackupCode: newBackup });
+  } catch(e) { res.status(500).json({ error: 'Ошибка сервера' }); }
 });
 
 // ═══════════════════════════════════════════
@@ -269,17 +249,18 @@ app.get('/relay', (req,res) => {
 // ═══════════════════════════════════════════
 //  HEALTH + START
 // ═══════════════════════════════════════════
-app.get('/health', (req, res) => {
-  const row = dbGet('SELECT COUNT(*) as c FROM accounts', []);
-  let q=0; Object.values(offlineQueue).forEach(x=>q+=x.length);
-  res.json({ok:true, service:'LIDERS CHAT', accounts:row?.c||0, online:Object.keys(pollers).length, queued:q});
+app.get('/health', async (req, res) => {
+  try {
+    const r = await pool.query('SELECT COUNT(*) as c FROM accounts');
+    let q=0; Object.values(offlineQueue).forEach(x=>q+=x.length);
+    res.json({ok:true, service:'LIDERS CHAT', accounts:parseInt(r.rows[0].c), online:Object.keys(pollers).length, queued:q});
+  } catch(e) { res.json({ok:false, error:e.message}); }
 });
 app.get('/', (req,res) => res.redirect('/health'));
 
-// Init DB then start server
 initDB().then(() => {
-  app.listen(PORT, () => console.log(`LIDERS CHAT Signal :${PORT}`));
-}).catch(e => { console.error('DB init failed:', e); process.exit(1); });
+  app.listen(PORT, () => console.log(`LIDERS CHAT Signal :${PORT} (Supabase PostgreSQL)`));
+}).catch(e => { console.error('DB init failed:', e.message); process.exit(1); });
 
-process.on('SIGTERM', () => { saveDB(); process.exit(0); });
-process.on('SIGINT',  () => { saveDB(); process.exit(0); });
+process.on('SIGTERM', () => { pool.end(); process.exit(0); });
+process.on('SIGINT',  () => { pool.end(); process.exit(0); });

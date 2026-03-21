@@ -1,14 +1,14 @@
 {
   "name": "liders-chat-signal",
-  "version": "4.1.0",
-  "description": "LIDERS CHAT Signal Server",
+  "version": "5.0.0",
+  "description": "LIDERS CHAT Signal Server with PostgreSQL",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
     "express": "^4.18.2",
-    "sql.js": "^1.10.3"
+    "pg": "^8.11.3"
   },
   "engines": {
     "node": ">=18.0.0"
