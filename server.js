@@ -1,7 +1,32 @@
 const express = require('express');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// ── Persistent storage ────────────────────────────────────
+const DATA_FILE = path.join('/tmp', 'liders_accounts.json');
+
+function loadAccounts() {
+  try {
+    if (fs.existsSync(DATA_FILE)) {
+      const data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+      console.log(`[storage] loaded ${Object.keys(data).length} accounts`);
+      return data;
+    }
+  } catch(e) { console.error('[storage] load error:', e.message); }
+  return {};
+}
+
+function saveAccounts() {
+  try {
+    fs.writeFileSync(DATA_FILE, JSON.stringify(accounts), 'utf8');
+  } catch(e) { console.error('[storage] save error:', e.message); }
+}
+
+// Auto-save every 60 seconds
+setInterval(saveAccounts, 60000);
 
 app.use(express.json({ limit: '1mb' }));
 app.use((req, res, next) => {
@@ -16,7 +41,7 @@ app.use((req, res, next) => {
 //  ACCOUNTS
 //  username -> { passwordHash, salt, peerId, createdAt }
 // ═══════════════════════════════════════════
-const accounts = {};    // username -> account
+const accounts = loadAccounts();  // username -> account (persisted)
 const sessions = {};    // token -> { username, peerId, expiresAt }
 const peerToUser = {};  // peerId -> username
 
@@ -64,6 +89,7 @@ app.post('/register', (req, res) => {
   const token = generateToken();
   sessions[token] = { username, peerId, expiresAt: Date.now() + 30 * 24 * 3600 * 1000 }; // 30 days
 
+  saveAccounts();
   console.log(`[+] registered: ${username} -> ${peerId}`);
   res.json({ ok: true, token, peerId, username });
 });
@@ -157,6 +183,34 @@ app.get('/poll/:peerId', (req, res) => {
   const timer = setTimeout(() => { if (pollers[peerId]) { delete pollers[peerId]; res.json({ signals: [] }); } }, POLL_TIMEOUT);
   pollers[peerId] = { res, timer };
   req.on('close', () => { if (pollers[peerId]?.res === res) { clearTimeout(timer); delete pollers[peerId]; } });
+});
+
+// ── POST /recover ─────────────────────────────────────────
+// Body: { username, backupCode, newPassword }
+app.post('/recover', (req, res) => {
+  const { username, backupCode, newPassword } = req.body || {};
+  if (!username || !backupCode || !newPassword) { res.status(400).json({ error: 'Заполните все поля' }); return; }
+  if (newPassword.length < 4) { res.status(400).json({ error: 'Пароль минимум 4 символа' }); return; }
+
+  const userLower = username.toLowerCase();
+  const account = accounts[userLower];
+  if (!account) { res.status(404).json({ error: 'Аккаунт не найден' }); return; }
+  if (!account.backupCode || account.backupCode.toUpperCase() !== backupCode.toUpperCase()) {
+    res.status(401).json({ error: 'Неверный код восстановления' }); return;
+  }
+
+  // Update password + regenerate backup code
+  const salt = crypto.randomBytes(16).toString('hex');
+  account.passwordHash = hashPassword(newPassword, salt);
+  account.salt = salt;
+  account.backupCode = crypto.randomBytes(6).toString('hex').toUpperCase();
+  saveAccounts();
+
+  const token = generateToken();
+  sessions[token] = { username: account.username, peerId: account.peerId, expiresAt: Date.now() + 30 * 24 * 3600 * 1000 };
+
+  console.log(`[recover] ${account.username}`);
+  res.json({ ok: true, token, peerId: account.peerId, username: account.username });
 });
 
 // ═══════════════════════════════════════════
