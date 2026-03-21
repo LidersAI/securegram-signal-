@@ -1,14 +1,14 @@
 {
   "name": "liders-chat-signal",
-  "version": "4.0.0",
-  "description": "LIDERS CHAT Signal Server with SQLite",
+  "version": "4.1.0",
+  "description": "LIDERS CHAT Signal Server",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
     "express": "^4.18.2",
-    "better-sqlite3": "^9.4.3"
+    "sql.js": "^1.10.3"
   },
   "engines": {
     "node": ">=18.0.0"
