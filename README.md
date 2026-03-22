@@ -2,38 +2,36 @@
 
 # 𝕃 LIDERS CHAT — Signal Server
 
-### HTTP Long-Polling Сигнальный Сервер
+### HTTP Long-Polling · PostgreSQL · Relay
 
-[![Deploy](https://img.shields.io/badge/Render-Live-46E3B7?style=for-the-badge&logo=render&logoColor=white)](https://liders-chat-signal.onrender.com/health)
-[![DB](https://img.shields.io/badge/Supabase-PostgreSQL-3ECF8E?style=for-the-badge&logo=supabase&logoColor=white)](#)
-[![Node](https://img.shields.io/badge/Node.js-18+-339933?style=for-the-badge&logo=nodedotjs&logoColor=white)](#)
+[![Render](https://img.shields.io/badge/Render-Live-46E3B7?style=for-the-badge&logo=render)](https://liders-chat-signal.onrender.com/health)
+[![Supabase](https://img.shields.io/badge/Supabase-PostgreSQL-3ECF8E?style=for-the-badge&logo=supabase)](https://supabase.com)
+[![Node](https://img.shields.io/badge/Node.js-18+-339933?style=for-the-badge&logo=nodedotjs)](https://nodejs.org)
 
 </div>
 
 ---
 
-## 📡 Что делает
+## 📡 Назначение
 
-Минимальный сервер для «знакомства» устройств. Участвует **только** при установке P2P соединения — меньше секунды. После этого весь трафик идёт напрямую между устройствами.
+Минимальный сигнальный сервер для WebRTC handshake. Участвует **~0.2 секунды** при установке соединения. После этого весь трафик идёт P2P напрямую между устройствами.
 
-**Сервер никогда не видит содержимое сообщений** — только зашифрованные блоки для офлайн-доставки.
+Дополнительно хранит зашифрованные сообщения для офлайн-доставки (relay) до 7 дней.
 
 ---
 
 ## 🔌 API
 
 ### Аккаунты
-
-| Метод | Путь | Описание |
-|---|---|---|
-| `GET` | `/check/:username` | Проверить занят ли никнейм |
-| `POST` | `/register` | Регистрация `{username, password}` |
-| `POST` | `/login` | Вход `{username, password}` |
-| `POST` | `/guest` | Анонимный вход |
-| `POST` | `/recover` | Восстановление `{username, backupCode, newPassword}` |
+| Метод | Путь | Тело | Ответ |
+|---|---|---|---|
+| `GET` | `/check/:username` | — | `{taken}` |
+| `POST` | `/register` | `{username, password}` | `{ok, token, peerId, username, backupCode}` |
+| `POST` | `/login` | `{username, password}` | `{ok, token, peerId, username}` |
+| `POST` | `/guest` | — | `{ok, peerId}` |
+| `POST` | `/recover` | `{username, backupCode, newPassword}` | `{ok, token, ...newBackupCode}` |
 
 ### Сигнализация (WebRTC)
-
 | Метод | Путь | Описание |
 |---|---|---|
 | `GET` | `/id` | Получить случайный peer ID |
@@ -41,45 +39,35 @@
 | `GET` | `/poll/:peerId` | Long-poll 20с — ждёт входящие сигналы |
 
 ### Relay (офлайн-доставка)
-
 | Метод | Путь | Описание |
 |---|---|---|
 | `POST` | `/relay` | Сохранить зашифрованные сообщения `{to, msgs}` |
 | `GET` | `/relay?peer=ID` | Забрать и удалить очередь |
 
 ### Мониторинг
-
-| Метод | Путь | Описание |
+| Метод | Путь | Ответ |
 |---|---|---|
-| `GET` | `/health` | Статус: аккаунты, онлайн, очередь |
+| `GET` | `/health` | `{ok, accounts, online, queued}` |
 
 ---
 
 ## 🔐 Безопасность
 
 - **Пароли:** PBKDF2-SHA256, 100 000 итераций, уникальная соль
-- **Резервный код:** PBKDF2-SHA256, хранится только хэш, никогда в открытом виде
-- **Сессии:** токены 64 hex-символа, срок 30 дней
-- **Rate limiting:** 120 сигналов/мин и 60 polling/мин с одного IP
-- **Валидация:** peerId только `[a-zA-Z0-9_-]`, не более 64 символов
+- **Резервный код:** PBKDF2-SHA256, хранится только хэш
+- **Сессии:** 64 hex-символа, срок 30 дней
+- **Rate limiting:** 120 сигналов/мин, 60 polling/мин с IP
+- **SSL:** принудительный для Supabase
 
 ---
 
-## 🗄 База данных
-
-**Supabase PostgreSQL** — аккаунты хранятся постоянно, переживают рестарты.
+## 🗄 База данных (Supabase PostgreSQL)
 
 ```sql
-CREATE TABLE accounts (
-  username      TEXT PRIMARY KEY,       -- никнейм (lowercase)
-  display_name  TEXT NOT NULL,          -- как ввёл пользователь
-  password_hash TEXT NOT NULL,          -- PBKDF2 хэш
-  salt          TEXT NOT NULL,
-  backup_hash   TEXT NOT NULL,          -- хэш резервного кода
-  backup_salt   TEXT NOT NULL,
-  peer_id       TEXT NOT NULL UNIQUE,   -- = username
-  created_at    BIGINT NOT NULL
-);
+accounts: username, display_name, password_hash, salt,
+          backup_hash, backup_salt, peer_id, created_at
+
+sessions: token, username, peer_id, expires_at
 ```
 
 ---
@@ -87,23 +75,21 @@ CREATE TABLE accounts (
 ## 📦 Стек
 
 ```
-Node.js 18+ + Express 4
-PostgreSQL (Supabase)
-pg (node-postgres)
+Node.js 18+ · Express 4 · pg (node-postgres) · Supabase
 ```
 
 ---
 
 ## 🚀 Деплой на Render
 
-1. Подключи репо → **New Web Service**
-2. Build: `npm install`
-3. Start: `npm start`
+1. New Web Service → GitHub репо
+2. Build: `npm install` · Start: `npm start`
+3. Environment variable:
+```
+DATABASE_URL=postgresql://postgres:...@db.xxx.supabase.co:5432/postgres
+```
 
-**Переменная окружения:**
-```
-DATABASE_URL = postgresql://postgres:...@db.xxx.supabase.co:5432/postgres
-```
+**Важно:** подключи UptimeRobot на `https://liders-chat-signal.onrender.com/health` каждые 5 минут — иначе Render засыпает и соединения рвутся.
 
 ---
 
@@ -111,7 +97,7 @@ DATABASE_URL = postgresql://postgres:...@db.xxx.supabase.co:5432/postgres
 
 ```bash
 curl https://liders-chat-signal.onrender.com/health
-# {"ok":true,"service":"LIDERS CHAT","accounts":42,"online":3,"queued":0}
+# {"ok":true,"service":"LIDERS CHAT","accounts":5,"online":2,"queued":0}
 ```
 
 ---
