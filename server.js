@@ -16,13 +16,18 @@ app.use((req, res, next) => {
 // ═══════════════════════════════════════════
 //  DATABASE (PostgreSQL / Supabase)
 // ═══════════════════════════════════════════
-const DATABASE_URL = process.env.DATABASE_URL ||
+// Parse connection string and force IPv4
+const DB_URL = process.env.DATABASE_URL ||
   'postgresql://postgres:C9ZDC0bQj4Wl3JJv@db.iivmtdjflstyzexuxwxu.supabase.co:5432/postgres';
 
 const pool = new Pool({
-  connectionString: DATABASE_URL,
+  host: 'aws-0-us-west-2.pooler.supabase.com',
+  port: 6543,
+  database: 'postgres',
+  user: 'postgres.iivmtdjflstyzexuxwxu',
+  password: 'C9ZDC0bQj4Wl3JJv',
   ssl: { rejectUnauthorized: false },
-  family: 4  // Force IPv4
+  family: 4
 });
 
 async function initDB() {
