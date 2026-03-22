@@ -101,9 +101,15 @@ app.post('/register', async (req, res) => {
     const backupSalt = crypto.randomBytes(16).toString('hex');
     const backupHash = hashBackupCode(backupCode, backupSalt);
 
+    // Check if founder (first 100 users)
+    const countRes = await pool.query('SELECT COUNT(*) as c FROM accounts');
+    const accountCount = parseInt(countRes.rows[0].c);
+    const isFounder = accountCount < 100;
+    const displayName = isFounder ? '⭐ ' + username : username;
+
     await pool.query(
       'INSERT INTO accounts (username,display_name,password_hash,salt,backup_hash,backup_salt,peer_id,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
-      [userLower, username, passwordHash, salt, backupHash, backupSalt, userLower, Date.now()]
+      [userLower, displayName, passwordHash, salt, backupHash, backupSalt, userLower, Date.now()]
     );
 
     const token = generateToken();
@@ -112,8 +118,8 @@ app.post('/register', async (req, res) => {
       [token, userLower, userLower, Date.now() + 30*24*3600*1000]
     );
 
-    console.log(`[+] registered: ${username}`);
-    res.json({ ok: true, token, peerId: userLower, username, backupCode });
+    console.log(`[+] registered: ${displayName}${isFounder?' [FOUNDER]':''}`);
+    res.json({ ok: true, token, peerId: userLower, username: displayName, backupCode, isFounder });
   } catch(e) { console.error(e); res.status(500).json({ error: 'Ошибка сервера' }); }
 });
 
@@ -136,8 +142,9 @@ app.post('/login', async (req, res) => {
       [token, userLower, account.peer_id, Date.now() + 30*24*3600*1000]
     );
 
+    const isFounder = account.display_name.startsWith('⭐');
     console.log(`[login] ${account.display_name}`);
-    res.json({ ok: true, token, peerId: account.peer_id, username: account.display_name });
+    res.json({ ok: true, token, peerId: account.peer_id, username: account.display_name, isFounder });
   } catch(e) { res.status(500).json({ error: 'Ошибка сервера' }); }
 });
 
