@@ -21,7 +21,8 @@ const DATABASE_URL = process.env.DATABASE_URL ||
 
 const pool = new Pool({
   connectionString: DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+  ssl: { rejectUnauthorized: false },
+  family: 4  // Force IPv4
 });
 
 async function initDB() {
