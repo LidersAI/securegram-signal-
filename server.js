@@ -32,6 +32,36 @@ const pool = new Pool({
 
 async function initDB() {
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS groups (
+      room_id     TEXT PRIMARY KEY,
+      host_id     TEXT NOT NULL,
+      name        TEXT NOT NULL,
+      emoji       TEXT DEFAULT '👥',
+      pin         TEXT DEFAULT '',
+      is_channel  BOOLEAN DEFAULT FALSE,
+      created_at  BIGINT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS group_members (
+      room_id     TEXT NOT NULL,
+      peer_id     TEXT NOT NULL,
+      display_name TEXT NOT NULL,
+      joined_at   BIGINT NOT NULL,
+      PRIMARY KEY (room_id, peer_id)
+    );
+    CREATE TABLE IF NOT EXISTS group_messages (
+      id          TEXT PRIMARY KEY,
+      room_id     TEXT NOT NULL,
+      from_id     TEXT NOT NULL,
+      from_name   TEXT NOT NULL,
+      cipher      TEXT NOT NULL,
+      msg_date    TEXT NOT NULL,
+      msg_ts      TEXT NOT NULL,
+      created_at  BIGINT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_gm_room ON group_messages(room_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_members_room ON group_members(room_id);
+  `);
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS accounts (
       username      TEXT PRIMARY KEY,
       display_name  TEXT NOT NULL,
@@ -259,6 +289,78 @@ app.get('/relay', (req,res) => {
 // ═══════════════════════════════════════════
 //  HEALTH + START
 // ═══════════════════════════════════════════
+// ═══════════════════════════════════════════
+//  GROUPS API
+// ═══════════════════════════════════════════
+
+// Create or update group
+app.post('/group', async (req, res) => {
+  const { roomId, hostId, name, emoji, pin, isChannel } = req.body || {};
+  if (!roomId || !hostId || !name) { res.status(400).json({ error: 'bad' }); return; }
+  try {
+    await pool.query(`
+      INSERT INTO groups (room_id, host_id, name, emoji, pin, is_channel, created_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7)
+      ON CONFLICT (room_id) DO UPDATE SET name=$3, emoji=$4, pin=$5
+    `, [roomId, hostId, name, emoji||'👥', pin||'', isChannel||false, Date.now()]);
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Get group info + members
+app.get('/group/:roomId', async (req, res) => {
+  const { roomId } = req.params;
+  try {
+    const g = await pool.query('SELECT * FROM groups WHERE room_id=$1', [roomId]);
+    if (!g.rows.length) { res.status(404).json({ error: 'not found' }); return; }
+    const m = await pool.query('SELECT * FROM group_members WHERE room_id=$1', [roomId]);
+    res.json({ ok: true, group: g.rows[0], members: m.rows });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Join group
+app.post('/group/:roomId/join', async (req, res) => {
+  const { roomId } = req.params;
+  const { peerId, displayName } = req.body || {};
+  if (!peerId) { res.status(400).json({ error: 'bad' }); return; }
+  try {
+    await pool.query(`
+      INSERT INTO group_members (room_id, peer_id, display_name, joined_at)
+      VALUES ($1,$2,$3,$4)
+      ON CONFLICT (room_id, peer_id) DO UPDATE SET display_name=$3
+    `, [roomId, peerId, displayName||peerId, Date.now()]);
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Post message to group
+app.post('/group/:roomId/msg', async (req, res) => {
+  const { roomId } = req.params;
+  const { id, fromId, fromName, cipher, msgDate, msgTs } = req.body || {};
+  if (!id || !fromId || !cipher) { res.status(400).json({ error: 'bad' }); return; }
+  try {
+    await pool.query(`
+      INSERT INTO group_messages (id, room_id, from_id, from_name, cipher, msg_date, msg_ts, created_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+      ON CONFLICT (id) DO NOTHING
+    `, [id, roomId, fromId, fromName||fromId, cipher, msgDate||'', msgTs||'', Date.now()]);
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Get group messages (last 100)
+app.get('/group/:roomId/msgs', async (req, res) => {
+  const { roomId } = req.params;
+  const since = parseInt(req.query.since) || 0;
+  try {
+    const r = await pool.query(
+      'SELECT * FROM group_messages WHERE room_id=$1 AND created_at>$2 ORDER BY created_at ASC LIMIT 100',
+      [roomId, since]
+    );
+    res.json({ ok: true, msgs: r.rows });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/health', async (req, res) => {
   try {
     const r = await pool.query('SELECT COUNT(*) as c FROM accounts');
