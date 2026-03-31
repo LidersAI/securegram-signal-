@@ -1,16 +1,8 @@
 {
   "name": "liders-chat-signal",
   "version": "5.0.0",
-  "description": "LIDERS CHAT Signal Server with PostgreSQL",
   "main": "server.js",
-  "scripts": {
-    "start": "node server.js"
-  },
-  "dependencies": {
-    "express": "^4.18.2",
-    "pg": "^8.11.3"
-  },
-  "engines": {
-    "node": ">=18.0.0"
-  }
+  "scripts": { "start": "node server.js" },
+  "dependencies": { "express": "^4.18.2", "pg": "^8.11.3" },
+  "engines": { "node": ">=18.0.0" }
 }
